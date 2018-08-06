@@ -374,6 +374,9 @@ class ResourceMap(collections.Mapping):
             "AWS::StackId": stack_id,
             "AWS::StackName": stack_name,
             "AWS::NoValue": None,
+            "AWS::Partition" : "aws",
+            "AWS::NotificationARNS" : "",
+            "AWS::URLSuffix": "amazonaws.com"
         }
 
     def __getitem__(self, key):
@@ -384,6 +387,7 @@ class ResourceMap(collections.Mapping):
         else:
             resource_json = self._resource_json_map.get(resource_logical_id)
             if not resource_json:
+                logger.error("resource_logical_id: %s", resource_logical_id)
                 raise KeyError(resource_logical_id)
             new_resource = parse_and_create_resource(
                 resource_logical_id, resource_json, self, self._region_name)
