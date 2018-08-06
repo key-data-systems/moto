@@ -369,6 +369,7 @@ class UsagePlanKey(BaseModel, dict):
 class RestAPI(BaseModel):
 
     def __repr__(self):
+        print(">>>>>>>>>>>>>>>>>>>>>>> RESTAPI")
         return str(self.id)
         
     def __init__(self, id, region_name, name, description):
