@@ -227,8 +227,6 @@ class CloudFormationResponse(BaseResponse):
                 stack_name).template
         elif not stack_body and template_url:
             stack_body = self._get_stack_from_s3_url(template_url)
-        else:
-            stack_body = self._get_param('TemplateBody')
 
         parameters = dict([
             (parameter['parameter_key'], parameter['parameter_value'])
