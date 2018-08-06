@@ -19,17 +19,20 @@ def test_create_database():
                                        MasterUserPassword='hunter2',
                                        Port=1234,
                                        DBSecurityGroups=["my_sg"])
-    database['DBInstance']['AllocatedStorage'].should.equal(10)
-    database['DBInstance']['DBInstanceClass'].should.equal("db.m1.small")
-    database['DBInstance']['LicenseModel'].should.equal("license-included")
-    database['DBInstance']['MasterUsername'].should.equal("root")
-    database['DBInstance']['DBSecurityGroups'][0][
+    db_instance = database['DBInstance']
+    db_instance['AllocatedStorage'].should.equal(10)
+    db_instance['DBInstanceClass'].should.equal("db.m1.small")
+    db_instance['LicenseModel'].should.equal("license-included")
+    db_instance['MasterUsername'].should.equal("root")
+    db_instance['DBSecurityGroups'][0][
         'DBSecurityGroupName'].should.equal('my_sg')
-    database['DBInstance']['DBInstanceArn'].should.equal(
+    db_instance['DBInstanceArn'].should.equal(
         'arn:aws:rds:us-west-2:1234567890:db:db-master-1')
-    database['DBInstance']['DBInstanceStatus'].should.equal('available')
-    database['DBInstance']['DBName'].should.equal('staging-postgres')
-    database['DBInstance']['DBInstanceIdentifier'].should.equal("db-master-1")
+    db_instance['DBInstanceStatus'].should.equal('available')
+    db_instance['DBName'].should.equal('staging-postgres')
+    db_instance['DBInstanceIdentifier'].should.equal("db-master-1")
+    db_instance['IAMDatabaseAuthenticationEnabled'].should.equal(False)
+    db_instance['DbiResourceId'].should.contain("db-")
 
 
 @mock_rds2
@@ -197,6 +200,8 @@ def test_get_databases_paginated():
     resp2 = conn.describe_db_instances(Marker=resp["Marker"])
     resp2["DBInstances"].should.have.length_of(1)
 
+    resp3 = conn.describe_db_instances(MaxRecords=100)
+    resp3["DBInstances"].should.have.length_of(51)
 
 @mock_rds2
 def test_describe_non_existant_database():
@@ -348,8 +353,6 @@ def test_describe_db_snapshots():
                             MasterUserPassword='hunter2',
                             Port=1234,
                             DBSecurityGroups=["my_sg"])
-    conn.describe_db_snapshots.when.called_with(
-        DBInstanceIdentifier="db-primary-1").should.throw(ClientError)
 
     created = conn.create_db_snapshot(DBInstanceIdentifier='db-primary-1',
                                       DBSnapshotIdentifier='snapshot-1').get('DBSnapshot')
@@ -363,6 +366,11 @@ def test_describe_db_snapshots():
     snapshot = by_snapshot_id[0]
     snapshot.should.equal(created)
     snapshot.get('Engine').should.equal('postgres')
+
+    conn.create_db_snapshot(DBInstanceIdentifier='db-primary-1',
+                            DBSnapshotIdentifier='snapshot-2')
+    snapshots = conn.describe_db_snapshots(DBInstanceIdentifier='db-primary-1').get('DBSnapshots')
+    snapshots.should.have.length_of(2)
 
 
 @mock_rds2

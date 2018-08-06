@@ -74,18 +74,18 @@ class FakeAlarm(BaseModel):
 
         self.state_reason = ''
         self.state_reason_data = '{}'
-        self.state = 'OK'
+        self.state_value = 'OK'
         self.state_updated_timestamp = datetime.utcnow()
 
     def update_state(self, reason, reason_data, state_value):
         # History type, that then decides what the rest of the items are, can be one of ConfigurationUpdate | StateUpdate | Action
         self.history.append(
-            ('StateUpdate', self.state_reason, self.state_reason_data, self.state, self.state_updated_timestamp)
+            ('StateUpdate', self.state_reason, self.state_reason_data, self.state_value, self.state_updated_timestamp)
         )
 
         self.state_reason = reason
         self.state_reason_data = reason_data
-        self.state = state_value
+        self.state_value = state_value
         self.state_updated_timestamp = datetime.utcnow()
 
 
@@ -221,7 +221,7 @@ class CloudWatchBackend(BaseBackend):
         ]
 
     def get_alarms_by_state_value(self, target_state):
-        return filter(lambda alarm: alarm.state == target_state, self.alarms.values())
+        return filter(lambda alarm: alarm.state_value == target_state, self.alarms.values())
 
     def delete_alarms(self, alarm_names):
         for alarm_name in alarm_names:
@@ -229,8 +229,13 @@ class CloudWatchBackend(BaseBackend):
 
     def put_metric_data(self, namespace, metric_data):
         for metric_member in metric_data:
+            # Preserve "datetime" for get_metric_statistics comparisons
+            timestamp = metric_member.get('Timestamp')
+            if timestamp is not None and type(timestamp) != datetime:
+                timestamp = datetime.strptime(timestamp, '%Y-%m-%dT%H:%M:%S.%fZ')
+                timestamp = timestamp.replace(tzinfo=tzutc())
             self.metric_data.append(MetricDatum(
-                namespace, metric_member['MetricName'], float(metric_member['Value']), metric_member.get('Dimensions.member', _EMPTY_LIST), metric_member.get('Timestamp')))
+                namespace, metric_member['MetricName'], float(metric_member.get('Value', 0)), metric_member.get('Dimensions.member', _EMPTY_LIST), timestamp))
 
     def get_metric_statistics(self, namespace, metric_name, start_time, end_time, period, stats):
         period_delta = timedelta(seconds=period)

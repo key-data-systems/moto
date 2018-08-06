@@ -135,7 +135,9 @@ class Item(BaseModel):
         assert len(parts) % 2 == 0, "Mismatched operators and values in update expression: '{}'".format(update_expression)
         for action, valstr in zip(parts[:-1:2], parts[1::2]):
             action = action.upper()
-            values = valstr.split(',')
+
+            # "Should" retain arguments in side (...)
+            values = re.split(r',(?![^(]*\))', valstr)
             for value in values:
                 # A Real value
                 value = value.lstrip(":").rstrip(",").strip()
@@ -145,9 +147,23 @@ class Item(BaseModel):
                 if action == "REMOVE":
                     self.attrs.pop(value, None)
                 elif action == 'SET':
-                    key, value = value.split("=")
+                    key, value = value.split("=", 1)
                     key = key.strip()
                     value = value.strip()
+
+                    # If not exists, changes value to a default if needed, else its the same as it was
+                    if value.startswith('if_not_exists'):
+                        # Function signature
+                        match = re.match(r'.*if_not_exists\((?P<path>.+),\s*(?P<default>.+)\).*', value)
+                        if not match:
+                            raise TypeError
+
+                        path, value = match.groups()
+
+                        # If it already exists, get its value so we dont overwrite it
+                        if path in self.attrs:
+                            value = self.attrs[path].cast_value
+
                     if value in expression_attribute_values:
                         value = DynamoType(expression_attribute_values[value])
                     else:
@@ -160,16 +176,17 @@ class Item(BaseModel):
                         key_parts = key.split('.')
                         attr = key_parts.pop(0)
                         if attr not in self.attrs:
-                            raise ValueError()
+                            raise ValueError
 
                         last_val = self.attrs[attr].value
                         for key_part in key_parts:
                             # Hack but it'll do, traverses into a dict
-                            if list(last_val.keys())[0] == 'M':
-                                last_val = last_val['M']
+                            last_val_type = list(last_val.keys())
+                            if last_val_type and last_val_type[0] == 'M':
+                                    last_val = last_val['M']
 
                             if key_part not in last_val:
-                                raise ValueError()
+                                last_val[key_part] = {'M': {}}
 
                             last_val = last_val[key_part]
 
@@ -392,7 +409,8 @@ class Table(BaseModel):
                 current_attr = current
 
             for key, val in expected.items():
-                if 'Exists' in val and val['Exists'] is False:
+                if 'Exists' in val and val['Exists'] is False \
+                        or 'ComparisonOperator' in val and val['ComparisonOperator'] == 'NULL':
                     if key in current_attr:
                         raise ValueError("The conditional request failed")
                 elif key not in current_attr:
@@ -402,8 +420,10 @@ class Table(BaseModel):
                 elif 'ComparisonOperator' in val:
                     comparison_func = get_comparison_func(
                         val['ComparisonOperator'])
-                    dynamo_types = [DynamoType(ele) for ele in val[
-                        "AttributeValueList"]]
+                    dynamo_types = [
+                        DynamoType(ele) for ele in
+                        val.get("AttributeValueList", [])
+                    ]
                     for t in dynamo_types:
                         if not comparison_func(current_attr[key].value, t.value):
                             raise ValueError('The conditional request failed')
@@ -520,14 +540,6 @@ class Table(BaseModel):
         else:
             results.sort(key=lambda item: item.range_key)
 
-        if projection_expression:
-            expressions = [x.strip() for x in projection_expression.split(',')]
-            results = copy.deepcopy(results)
-            for result in results:
-                for attr in list(result.attrs):
-                    if attr not in expressions:
-                        result.attrs.pop(attr)
-
         if scan_index_forward is False:
             results.reverse()
 
@@ -535,6 +547,14 @@ class Table(BaseModel):
 
         if filter_expression is not None:
             results = [item for item in results if filter_expression.expr(item)]
+
+        if projection_expression:
+            expressions = [x.strip() for x in projection_expression.split(',')]
+            results = copy.deepcopy(results)
+            for result in results:
+                for attr in list(result.attrs):
+                    if attr not in expressions:
+                        result.attrs.pop(attr)
 
         results, last_evaluated_key = self._trim_results(results, limit,
                                                          exclusive_start_key)
@@ -689,7 +709,9 @@ class DynamoDBBackend(BaseBackend):
 
                 gsis_by_name[gsi_to_create['IndexName']] = gsi_to_create
 
-        table.global_indexes = gsis_by_name.values()
+        # in python 3.6, dict.values() returns a dict_values object, but we expect it to be a list in other
+        # parts of the codebase
+        table.global_indexes = list(gsis_by_name.values())
         return table
 
     def put_item(self, table_name, item_attrs, expected=None, overwrite=False):
@@ -808,7 +830,8 @@ class DynamoDBBackend(BaseBackend):
             expected = {}
 
         for key, val in expected.items():
-            if 'Exists' in val and val['Exists'] is False:
+            if 'Exists' in val and val['Exists'] is False \
+                    or 'ComparisonOperator' in val and val['ComparisonOperator'] == 'NULL':
                 if key in item_attr:
                     raise ValueError("The conditional request failed")
             elif key not in item_attr:
@@ -818,8 +841,10 @@ class DynamoDBBackend(BaseBackend):
             elif 'ComparisonOperator' in val:
                 comparison_func = get_comparison_func(
                     val['ComparisonOperator'])
-                dynamo_types = [DynamoType(ele) for ele in val[
-                    "AttributeValueList"]]
+                dynamo_types = [
+                    DynamoType(ele) for ele in
+                    val.get("AttributeValueList", [])
+                ]
                 for t in dynamo_types:
                     if not comparison_func(item_attr[key].value, t.value):
                         raise ValueError('The conditional request failed')

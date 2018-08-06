@@ -10,6 +10,8 @@ from moto.core import BaseBackend, BaseModel
 from moto.ec2 import ec2_backends
 from copy import copy
 
+from .exceptions import ServiceNotFoundException
+
 
 class BaseObject(BaseModel):
 
@@ -24,7 +26,7 @@ class BaseObject(BaseModel):
 
     def gen_response_object(self):
         response_object = copy(self.__dict__)
-        for key, value in response_object.items():
+        for key, value in self.__dict__.items():
             if '_' in key:
                 response_object[self.camelCase(key)] = value
                 del response_object[key]
@@ -61,7 +63,11 @@ class Cluster(BaseObject):
 
     @classmethod
     def create_from_cloudformation_json(cls, resource_name, cloudformation_json, region_name):
-        properties = cloudformation_json['Properties']
+        # if properties is not provided, cloudformation will use the default values for all properties
+        if 'Properties' in cloudformation_json:
+            properties = cloudformation_json['Properties']
+        else:
+            properties = {}
 
         ecs_backend = ecs_backends[region_name]
         return ecs_backend.create_cluster(
@@ -108,6 +114,10 @@ class TaskDefinition(BaseObject):
         response_object['taskDefinitionArn'] = response_object['arn']
         del response_object['arn']
         return response_object
+
+    @property
+    def physical_resource_id(self):
+        return self.arn
 
     @classmethod
     def create_from_cloudformation_json(cls, resource_name, cloudformation_json, region_name):
@@ -169,7 +179,7 @@ class Task(BaseObject):
 
 class Service(BaseObject):
 
-    def __init__(self, cluster, service_name, task_definition, desired_count):
+    def __init__(self, cluster, service_name, task_definition, desired_count, load_balancers=None):
         self.cluster_arn = cluster.arn
         self.arn = 'arn:aws:ecs:us-east-1:012345678910:service/{0}'.format(
             service_name)
@@ -191,7 +201,7 @@ class Service(BaseObject):
                 'updatedAt': datetime.now(pytz.utc),
             }
         ]
-        self.load_balancers = []
+        self.load_balancers = load_balancers if load_balancers is not None else []
         self.pending_count = 0
 
     @property
@@ -502,10 +512,27 @@ class EC2ContainerServiceBackend(BaseBackend):
     def _calculate_task_resource_requirements(task_definition):
         resource_requirements = {"CPU": 0, "MEMORY": 0, "PORTS": [], "PORTS_UDP": []}
         for container_definition in task_definition.container_definitions:
-            resource_requirements["CPU"] += container_definition.get('cpu')
-            resource_requirements["MEMORY"] += container_definition.get("memory")
-            for port_mapping in container_definition.get("portMappings", []):
-                resource_requirements["PORTS"].append(port_mapping.get('hostPort'))
+            # cloudformation uses capitalized properties, while boto uses all lower case
+
+            # CPU is optional
+            resource_requirements["CPU"] += container_definition.get('cpu',
+                                                                     container_definition.get('Cpu', 0))
+
+            # either memory or memory reservation must be provided
+            if 'Memory' in container_definition or 'MemoryReservation' in container_definition:
+                resource_requirements["MEMORY"] += container_definition.get(
+                    "Memory", container_definition.get('MemoryReservation'))
+            else:
+                resource_requirements["MEMORY"] += container_definition.get(
+                    "memory", container_definition.get('memoryReservation'))
+
+            port_mapping_key = 'PortMappings' if 'PortMappings' in container_definition else 'portMappings'
+            for port_mapping in container_definition.get(port_mapping_key, []):
+                if 'hostPort' in port_mapping:
+                    resource_requirements["PORTS"].append(port_mapping.get('hostPort'))
+                elif 'HostPort' in port_mapping:
+                    resource_requirements["PORTS"].append(port_mapping.get('HostPort'))
+
         return resource_requirements
 
     @staticmethod
@@ -576,8 +603,9 @@ class EC2ContainerServiceBackend(BaseBackend):
             raise Exception("tasks cannot be empty")
         response = []
         for cluster, cluster_tasks in self.tasks.items():
-            for task_id, task in cluster_tasks.items():
-                if task_id in tasks or task.task_arn in tasks:
+            for task_arn, task in cluster_tasks.items():
+                task_id = task_arn.split("/")[-1]
+                if task_arn in tasks or task.task_arn in tasks or any(task_id in task for task in tasks):
                     response.append(task)
         return response
 
@@ -627,7 +655,7 @@ class EC2ContainerServiceBackend(BaseBackend):
         raise Exception("Could not find task {} on cluster {}".format(
             task_str, cluster_name))
 
-    def create_service(self, cluster_str, service_name, task_definition_str, desired_count):
+    def create_service(self, cluster_str, service_name, task_definition_str, desired_count, load_balancers=None):
         cluster_name = cluster_str.split('/')[-1]
         if cluster_name in self.clusters:
             cluster = self.clusters[cluster_name]
@@ -635,10 +663,12 @@ class EC2ContainerServiceBackend(BaseBackend):
             raise Exception("{0} is not a cluster".format(cluster_name))
         task_definition = self.describe_task_definition(task_definition_str)
         desired_count = desired_count if desired_count is not None else 0
+
         service = Service(cluster, service_name,
-                          task_definition, desired_count)
+                          task_definition, desired_count, load_balancers)
         cluster_service_pair = '{0}:{1}'.format(cluster_name, service_name)
         self.services[cluster_service_pair] = service
+
         return service
 
     def list_services(self, cluster_str):
@@ -673,8 +703,7 @@ class EC2ContainerServiceBackend(BaseBackend):
                     cluster_service_pair].desired_count = desired_count
             return self.services[cluster_service_pair]
         else:
-            raise Exception("cluster {0} or service {1} does not exist".format(
-                cluster_name, service_name))
+            raise ServiceNotFoundException(service_name)
 
     def delete_service(self, cluster_name, service_name):
         cluster_service_pair = '{0}:{1}'.format(cluster_name, service_name)

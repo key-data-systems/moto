@@ -1,16 +1,17 @@
 from __future__ import unicode_literals, print_function
 
+from decimal import Decimal
+
 import six
 import boto
 import boto3
-from boto3.dynamodb.conditions import Attr
+from boto3.dynamodb.conditions import Attr, Key
 import sure  # noqa
 import requests
 from moto import mock_dynamodb2, mock_dynamodb2_deprecated
 from moto.dynamodb2 import dynamodb_backend2
 from boto.exception import JSONResponseError
 from botocore.exceptions import ClientError
-from boto3.dynamodb.conditions import Key
 from tests.helpers import requires_boto_gte
 import tests.backport_assert_raises
 
@@ -245,6 +246,33 @@ def test_scan_returns_consumed_capacity():
     assert 'ConsumedCapacity' in response
     assert 'CapacityUnits' in response['ConsumedCapacity']
     assert response['ConsumedCapacity']['TableName'] == name
+
+
+@requires_boto_gte("2.9")
+@mock_dynamodb2
+def test_put_item_with_special_chars():
+    name = 'TestTable'
+    conn = boto3.client('dynamodb',
+                        region_name='us-west-2',
+                        aws_access_key_id="ak",
+                        aws_secret_access_key="sk")
+
+    conn.create_table(TableName=name,
+                      KeySchema=[{'AttributeName':'forum_name','KeyType':'HASH'}],
+                      AttributeDefinitions=[{'AttributeName':'forum_name','AttributeType':'S'}],
+                      ProvisionedThroughput={'ReadCapacityUnits':5,'WriteCapacityUnits':5})
+
+    conn.put_item(
+            TableName=name,
+            Item={
+                'forum_name': { 'S': 'LOLCat Forum' },
+                'subject': { 'S': 'Check this out!' },
+                'Body': { 'S': 'http://url_to_lolcat.gif'},
+                'SentBy': { 'S': "test" },
+                'ReceivedTime': { 'S': '12/9/2011 11:36:03 PM'},
+                '"': {"S": "foo"},
+            }
+        )
 
 
 @requires_boto_gte("2.9")
@@ -658,6 +686,14 @@ def test_filter_expression():
         {':v0': {'N': '7'}}
     )
     filter_expr.expr(row1).should.be(True)
+    # Expression from to check contains on string value
+    filter_expr = moto.dynamodb2.comparisons.get_filter_expression(
+        'contains(#n0, :v0)',
+        {'#n0': 'Desc'},
+        {':v0': {'S': 'Some'}}
+    )
+    filter_expr.expr(row1).should.be(True)
+    filter_expr.expr(row2).should.be(False)
 
 
 @mock_dynamodb2
@@ -699,6 +735,11 @@ def test_query_filter():
     )
     assert response['Count'] == 1
     assert response['Items'][0]['app'] == 'app2'
+    response = table.query(
+        KeyConditionExpression=Key('client').eq('client1'),
+        FilterExpression=Attr('app').contains('app')
+    )
+    assert response['Count'] == 2
 
 
 @mock_dynamodb2
@@ -1012,6 +1053,7 @@ def test_query_missing_expr_names():
 @mock_dynamodb2
 def test_update_item_on_map():
     dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
+    client = boto3.client('dynamodb', region_name='us-east-1')
 
     # Create the DynamoDB table.
     dynamodb.create_table(
@@ -1052,18 +1094,201 @@ def test_update_item_on_map():
     resp = table.scan()
     resp['Items'][0]['body'].should.equal({'nested': {'data': 'test'}})
 
+    # Nonexistent nested attributes are supported for existing top-level attributes.
     table.update_item(Key={
         'forum_name': 'the-key',
         'subject': '123'
         },
-        UpdateExpression='SET body.#nested.#data = :tb',
+        UpdateExpression='SET body.#nested.#data = :tb, body.nested.#nonexistentnested.#data = :tb2',
         ExpressionAttributeNames={
             '#nested': 'nested',
+            '#nonexistentnested': 'nonexistentnested',
             '#data': 'data'
         },
         ExpressionAttributeValues={
-            ':tb': 'new_value'
+            ':tb': 'new_value',
+            ':tb2': 'other_value'
     })
 
     resp = table.scan()
-    resp['Items'][0]['body'].should.equal({'nested': {'data': 'new_value'}})
+    resp['Items'][0]['body'].should.equal({
+        'nested': {
+            'data': 'new_value',
+            'nonexistentnested': {'data': 'other_value'}
+        }
+    })
+
+    # Test nested value for a nonexistent attribute.
+    with assert_raises(client.exceptions.ConditionalCheckFailedException):
+        table.update_item(Key={
+            'forum_name': 'the-key',
+            'subject': '123'
+            },
+            UpdateExpression='SET nonexistent.#nested = :tb',
+            ExpressionAttributeNames={
+                '#nested': 'nested'
+            },
+            ExpressionAttributeValues={
+                ':tb': 'new_value'
+        })
+
+
+
+# https://github.com/spulec/moto/issues/1358
+@mock_dynamodb2
+def test_update_if_not_exists():
+    dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
+
+    # Create the DynamoDB table.
+    dynamodb.create_table(
+        TableName='users',
+        KeySchema=[
+            {
+                'AttributeName': 'forum_name',
+                'KeyType': 'HASH'
+            },
+            {
+                'AttributeName': 'subject',
+                'KeyType': 'RANGE'
+            },
+        ],
+        AttributeDefinitions=[
+            {
+                'AttributeName': 'forum_name',
+                'AttributeType': 'S'
+            },
+            {
+                'AttributeName': 'subject',
+                'AttributeType': 'S'
+            },
+        ],
+        ProvisionedThroughput={
+            'ReadCapacityUnits': 5,
+            'WriteCapacityUnits': 5
+        }
+    )
+    table = dynamodb.Table('users')
+
+    table.put_item(Item={
+        'forum_name': 'the-key',
+        'subject': '123'
+    })
+
+    table.update_item(Key={
+        'forum_name': 'the-key',
+        'subject': '123'
+        },
+        UpdateExpression='SET created_at = if_not_exists(created_at, :created_at)',
+        ExpressionAttributeValues={
+            ':created_at': 123
+        }
+    )
+
+    resp = table.scan()
+    assert resp['Items'][0]['created_at'] == 123
+
+    table.update_item(Key={
+        'forum_name': 'the-key',
+        'subject': '123'
+        },
+        UpdateExpression='SET created_at = if_not_exists(created_at, :created_at)',
+        ExpressionAttributeValues={
+            ':created_at': 456
+        }
+    )
+
+    resp = table.scan()
+    # Still the original value
+    assert resp['Items'][0]['created_at'] == 123
+
+
+@mock_dynamodb2
+def test_query_global_secondary_index_when_created_via_update_table_resource():
+    dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
+
+    # Create the DynamoDB table.
+    dynamodb.create_table(
+        TableName='users',
+        KeySchema=[
+            {
+                'AttributeName': 'user_id',
+                'KeyType': 'HASH'
+            },
+        ],
+        AttributeDefinitions=[
+            {
+                'AttributeName': 'user_id',
+                'AttributeType': 'N',
+            },
+            {
+                'AttributeName': 'forum_name',
+                'AttributeType': 'S'
+            },
+            {
+                'AttributeName': 'subject',
+                'AttributeType': 'S'
+            },
+        ],
+        ProvisionedThroughput={
+            'ReadCapacityUnits': 5,
+            'WriteCapacityUnits': 5
+        },
+    )
+    table = dynamodb.Table('users')
+    table.update(
+        AttributeDefinitions=[
+            {
+                'AttributeName': 'forum_name',
+                'AttributeType': 'S'
+            },
+        ],
+        GlobalSecondaryIndexUpdates=[
+            {'Create':
+                {
+                    'IndexName': 'forum_name_index',
+                    'KeySchema': [
+                        {
+                            'AttributeName': 'forum_name',
+                            'KeyType': 'HASH',
+                        },
+                    ],
+                    'Projection': {
+                        'ProjectionType': 'ALL',
+                    },
+                    'ProvisionedThroughput': {
+                        'ReadCapacityUnits': 5,
+                        'WriteCapacityUnits': 5
+                    },
+                }
+            }
+        ]
+    )
+
+    next_user_id = 1
+    for my_forum_name in ['cats', 'dogs']:
+        for my_subject in ['my pet is the cutest', 'wow look at what my pet did', "don't you love my pet?"]:
+            table.put_item(Item={'user_id': next_user_id, 'forum_name': my_forum_name, 'subject': my_subject})
+            next_user_id += 1
+
+    # get all the cat users
+    forum_only_query_response = table.query(
+        IndexName='forum_name_index',
+        Select='ALL_ATTRIBUTES',
+        KeyConditionExpression=Key('forum_name').eq('cats'),
+    )
+    forum_only_items = forum_only_query_response['Items']
+    assert len(forum_only_items) == 3
+    for item in forum_only_items:
+        assert item['forum_name'] == 'cats'
+
+    # query all cat users with a particular subject
+    forum_and_subject_query_results = table.query(
+        IndexName='forum_name_index',
+        Select='ALL_ATTRIBUTES',
+        KeyConditionExpression=Key('forum_name').eq('cats'),
+        FilterExpression=Attr('subject').eq('my pet is the cutest'),
+    )
+    forum_and_subject_items = forum_and_subject_query_results['Items']
+    assert len(forum_and_subject_items) == 1
+    assert forum_and_subject_items[0] == {'user_id': Decimal('1'), 'forum_name': 'cats',
+                                          'subject': 'my pet is the cutest'}

@@ -247,9 +247,31 @@ def test_list_images():
     len(response['imageIds']).should.be(1)
     response['imageIds'][0]['imageTag'].should.equal('oldest')
 
-    response = client.list_images(repositoryName='test_repository_2', registryId='109876543210')
-    type(response['imageIds']).should.be(list)
-    len(response['imageIds']).should.be(0)
+
+@mock_ecr
+def test_list_images_from_repository_that_doesnt_exist():
+    client = boto3.client('ecr', region_name='us-east-1')
+    _ = client.create_repository(
+        repositoryName='test_repository_1'
+    )
+
+    # non existing repo
+    error_msg = re.compile(
+        r".*The repository with name 'repo-that-doesnt-exist' does not exist in the registry with id '123'.*",
+        re.MULTILINE)
+    client.list_images.when.called_with(
+        repositoryName='repo-that-doesnt-exist',
+        registryId='123',
+    ).should.throw(Exception, error_msg)
+
+    # repo does not exist in specified registry
+    error_msg = re.compile(
+        r".*The repository with name 'test_repository_1' does not exist in the registry with id '222'.*",
+        re.MULTILINE)
+    client.list_images.when.called_with(
+        repositoryName='test_repository_1',
+        registryId='222',
+    ).should.throw(Exception, error_msg)
 
 
 @mock_ecr
@@ -418,7 +440,7 @@ def test_get_authorization_token_assume_region():
     auth_token_response.should.contain('ResponseMetadata')
     auth_token_response['authorizationData'].should.equal([
         {
-            'authorizationToken': 'QVdTOnVzLWVhc3QtMS1hdXRoLXRva2Vu',
+            'authorizationToken': 'QVdTOjAxMjM0NTY3ODkxMC1hdXRoLXRva2Vu',
             'proxyEndpoint': 'https://012345678910.dkr.ecr.us-east-1.amazonaws.com',
             'expiresAt': datetime(2015, 1, 1, tzinfo=tzlocal())
         },
@@ -428,19 +450,19 @@ def test_get_authorization_token_assume_region():
 @mock_ecr
 def test_get_authorization_token_explicit_regions():
     client = boto3.client('ecr', region_name='us-east-1')
-    auth_token_response = client.get_authorization_token(registryIds=['us-east-1', 'us-west-1'])
+    auth_token_response = client.get_authorization_token(registryIds=['10987654321', '878787878787'])
 
     auth_token_response.should.contain('authorizationData')
     auth_token_response.should.contain('ResponseMetadata')
     auth_token_response['authorizationData'].should.equal([
         {
-            'authorizationToken': 'QVdTOnVzLWVhc3QtMS1hdXRoLXRva2Vu',
-            'proxyEndpoint': 'https://012345678910.dkr.ecr.us-east-1.amazonaws.com',
+            'authorizationToken': 'QVdTOjEwOTg3NjU0MzIxLWF1dGgtdG9rZW4=',
+            'proxyEndpoint': 'https://10987654321.dkr.ecr.us-east-1.amazonaws.com',
             'expiresAt': datetime(2015, 1, 1, tzinfo=tzlocal()),
         },
         {
-            'authorizationToken': 'QVdTOnVzLXdlc3QtMS1hdXRoLXRva2Vu',
-            'proxyEndpoint': 'https://012345678910.dkr.ecr.us-west-1.amazonaws.com',
+            'authorizationToken': 'QVdTOjg3ODc4Nzg3ODc4Ny1hdXRoLXRva2Vu',
+            'proxyEndpoint': 'https://878787878787.dkr.ecr.us-east-1.amazonaws.com',
             'expiresAt': datetime(2015, 1, 1, tzinfo=tzlocal())
 
         }

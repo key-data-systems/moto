@@ -11,6 +11,7 @@ from moto.autoscaling import models as autoscaling_models
 from moto.awslambda import models as lambda_models
 from moto.batch import models as batch_models
 from moto.cloudwatch import models as cloudwatch_models
+from moto.cognitoidentity import models as cognitoidentity_models
 from moto.datapipeline import models as datapipeline_models
 from moto.dynamodb import models as dynamodb_models
 from moto.ec2 import models as ec2_models
@@ -28,7 +29,7 @@ from moto.s3 import models as s3_models
 from moto.sns import models as sns_models
 from moto.sqs import models as sqs_models
 from .utils import random_suffix
-from .exceptions import MissingParameterError, UnformattedGetAttTemplateException, ValidationError
+from .exceptions import ExportNotFound, MissingParameterError, UnformattedGetAttTemplateException, ValidationError
 from boto.cloudformation.stack import Output
 
 MODEL_MAP = {
@@ -71,6 +72,7 @@ MODEL_MAP = {
     "AWS::ElasticLoadBalancingV2::LoadBalancer": elbv2_models.FakeLoadBalancer,
     "AWS::ElasticLoadBalancingV2::TargetGroup": elbv2_models.FakeTargetGroup,
     "AWS::ElasticLoadBalancingV2::Listener": elbv2_models.FakeListener,
+    "AWS::Cognito::IdentityPool": cognitoidentity_models.CognitoIdentity,
     "AWS::DataPipeline::Pipeline": datapipeline_models.Pipeline,
     "AWS::IAM::InstanceProfile": iam_models.InstanceProfile,
     "AWS::IAM::Role": iam_models.Role,
@@ -100,6 +102,7 @@ NAME_TYPE_MAP = {
     "AWS::ElasticBeanstalk::Application": "ApplicationName",
     "AWS::ElasticBeanstalk::Environment": "EnvironmentName",
     "AWS::ElasticLoadBalancing::LoadBalancer": "LoadBalancerName",
+    "AWS::ElasticLoadBalancingV2::TargetGroup": "Name",
     "AWS::RDS::DBInstance": "DBInstanceIdentifier",
     "AWS::S3::Bucket": "BucketName",
     "AWS::SNS::Topic": "TopicName",
@@ -210,6 +213,16 @@ def clean_json(resource_json, resources_map):
             values = [x.value for x in resources_map.cross_stack_resources.values() if x.name == cleaned_val]
             if any(values):
                 return values[0]
+            else:
+                raise ExportNotFound(cleaned_val)
+
+        if 'Fn::GetAZs' in resource_json:
+            region = resource_json.get('Fn::GetAZs') or DEFAULT_REGION
+            result = []
+            # TODO: make this configurable, to reflect the real AWS AZs
+            for az in ('a', 'b', 'c', 'd'):
+                result.append('%s%s' % (region, az))
+            return result
 
         if 'Fn::GetAZs' in resource_json:
             region = resource_json.get('Fn::GetAZs') or DEFAULT_REGION
@@ -246,6 +259,22 @@ def resource_name_property_from_type(resource_type):
     return NAME_TYPE_MAP.get(resource_type)
 
 
+def generate_resource_name(resource_type, stack_name, logical_id):
+    if resource_type == "AWS::ElasticLoadBalancingV2::TargetGroup":
+        # Target group names need to be less than 32 characters, so when cloudformation creates a name for you
+        # it makes sure to stay under that limit
+        name_prefix = '{0}-{1}'.format(stack_name, logical_id)
+        my_random_suffix = random_suffix()
+        truncated_name_prefix = name_prefix[0:32 - (len(my_random_suffix) + 1)]
+        # if the truncated name ends in a dash, we'll end up with a double dash in the final name, which is
+        # not allowed
+        if truncated_name_prefix.endswith('-'):
+            truncated_name_prefix = truncated_name_prefix[:-1]
+        return '{0}-{1}'.format(truncated_name_prefix, my_random_suffix)
+    else:
+        return '{0}-{1}-{2}'.format(stack_name, logical_id, random_suffix())
+
+
 def parse_resource(logical_id, resource_json, resources_map):
     resource_type = resource_json['Type']
     resource_class = resource_class_from_type(resource_type)
@@ -260,15 +289,12 @@ def parse_resource(logical_id, resource_json, resources_map):
         if 'Properties' not in resource_json:
             resource_json['Properties'] = dict()
         if resource_name_property not in resource_json['Properties']:
-            resource_json['Properties'][resource_name_property] = '{0}-{1}-{2}'.format(
-                resources_map.get('AWS::StackName'),
-                logical_id,
-                random_suffix())
+            resource_json['Properties'][resource_name_property] = generate_resource_name(
+                resource_type, resources_map.get('AWS::StackName'), logical_id)
         resource_name = resource_json['Properties'][resource_name_property]
     else:
-        resource_name = '{0}-{1}-{2}'.format(resources_map.get('AWS::StackName'),
-                                             logical_id,
-                                             random_suffix())
+        resource_name = generate_resource_name(resource_type, resources_map.get('AWS::StackName'), logical_id)
+
     return resource_class, resource_json, resource_name
 
 
@@ -373,6 +399,7 @@ class ResourceMap(collections.Mapping):
             "AWS::Region": self._region_name,
             "AWS::StackId": stack_id,
             "AWS::StackName": stack_name,
+            "AWS::URLSuffix": "amazonaws.com",
             "AWS::NoValue": None,
         }
 
