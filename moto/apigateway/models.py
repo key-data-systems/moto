@@ -329,6 +329,9 @@ class Stage(BaseModel, dict):
 
 class RestAPI(BaseModel):
 
+    def __repr__(self):
+        return str(self.id)
+        
     def __init__(self, id, region_name, name, description):
         self.id = id
         self.region_name = region_name

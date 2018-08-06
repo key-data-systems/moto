@@ -442,6 +442,10 @@ class EventSourceMapping(BaseModel):
 
 
 class LambdaVersion(BaseModel):
+
+     def __repr(self):
+        return str(self.logical_resource_id)
+        
     def __init__(self, spec):
         self.version = spec['Version']
 
