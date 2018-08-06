@@ -445,6 +445,10 @@ class LambdaVersion(BaseModel):
     def __init__(self, spec):
         self.version = spec['Version']
 
+    def __repr__(self):
+        print("!!! LambdaVersion")
+        return str(self.logical_resource_id)
+
     @classmethod
     def create_from_cloudformation_json(cls, resource_name, cloudformation_json,
                                         region_name):
